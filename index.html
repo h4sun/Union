@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="sidebar">
+        <div class="channel-group">
+        <h3>YAZI KANALLARI</h3>
+        <div class="channel" onclick="selectChannel('genel-chat')"># genel-chat</div>
+        </div>
+        <div class="channel-group">
+        <h3>SES KANALLARI</h3>
+        <div class="channel" id="voice-ch">🔊 voice-channel
+            <ul id="voice-ul">
+
+            </ul>
+        </div>
+        </div>
+        <audio class="voice" autoplay controls volume="1.0"></audio>
+    </div>
+
+    <div class="main">
+        <div class="chat-header"># genel-chat</div>
+
+        <div class="chat-window" id="chat">
+        </div>
+
+        <div class="message-input">
+        <input type="text" id="messageInput" placeholder="Bir mesaj yaz..." />
+        <button onclick="sendMessage()">Gönder</button>
+        </div>
+    </div>
+    
+
+    <!--Base JS-->
+    <script>
+        const chat = document.getElementById('chat');
+        const input = document.getElementById('messageInput');
+
+        function sendMessage() {
+            const text = input.value.trim();
+
+            if (text === '') {
+                return;
+            }
+
+            const msg = {
+                sender: clientUsername,
+                content: text
+            };
+
+            addMessage(msg);
+            input.value = '';
+
+            for (let peerId in peers) {
+
+                const channel = peers[peerId].dataChannel;
+                if (channel && channel.readyState === 'open') {
+                    channel.send(JSON.stringify(msg));
+                }
+
+            }
+
+        }
+        
+        function addMessage({sender, content}) {
+
+            const div = document.createElement('div');
+
+            div.className = 'message';
+            div.innerHTML = `<strong>${sender}:</strong> ${content}`;
+            chat.appendChild(div);
+            chat.scrollTop = chat.scrollHeight;
+        }
+
+        function handleIncomingMessage(data) {
+
+            const msg = JSON.parse(data);
+            addMessage(msg);
+
+        }
+
+        let mediaStream = null;
+        const voiceCh = document.querySelector('#voice-ch');
+        voiceCh.addEventListener('click', async () => {
+            if (!mediaStream) {
+                client.send(JSON.stringify({
+                    type: 'check-user',
+                    id: clientId
+                }));
+
+                try {
+                    mediaStream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            echoCancellation: false,
+                            noiseSuppression: false, // Web Audio ile yöneteceğiz
+                            autoGainControl: true    // Bu hala faydalı olabilir
+                        }
+                    }); 
+                    console.log("🎤 Mikrofon izin durumu:", mediaStream.getAudioTracks().map(t => t.enabled));
+
+
+
+                    console.log("Got the mic for Web Audio processing!");
+
+                    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+                    const source = audioContext.createMediaStreamSource(mediaStream);
+
+                    // 1. High-Pass Filter (Düşük frekanslı gürültüleri keser - nefes, uğultu vb.)
+                    const highpassFilter = audioContext.createBiquadFilter();
+                    highpassFilter.type = 'highpass';
+                    highpassFilter.frequency.setValueAtTime(150, audioContext.currentTime); // Örneğin 150 Hz altını kes
+
+                    // 2. Low-Pass Filter (Yüksek frekanslı gürültüleri keser - klavye tizleri vb.)
+                    const lowpassFilter = audioContext.createBiquadFilter();
+                    lowpassFilter.type = 'lowpass';
+                    lowpassFilter.frequency.setValueAtTime(3500, audioContext.currentTime); // Örneğin 3500 Hz üstünü kes
+
+                    // 3. Dinamik Kompresör (Ani ses yükselişlerini ve genel dinamikleri kontrol eder)
+                    const compressor = audioContext.createDynamicsCompressor();
+                    compressor.threshold.setValueAtTime(-35, audioContext.currentTime);
+                    compressor.knee.setValueAtTime(30, audioContext.currentTime);
+                    compressor.ratio.setValueAtTime(15, audioContext.currentTime);
+                    compressor.attack.setValueAtTime(0.003, audioContext.currentTime);
+                    compressor.release.setValueAtTime(0.25, audioContext.currentTime);
+
+                    // 4. Kazanç Düğümü (Genel ses seviyesini ayarlar)
+                    const gainNode = audioContext.createGain();
+                    gainNode.gain.setValueAtTime(0.7, audioContext.currentTime); // Mikrofon sesini bir miktar zayıflat
+
+                    // Bağlantı Zinciri: Source -> High-Pass -> Low-Pass -> Compressor -> Gain -> Destination
+                    source.connect(highpassFilter);
+                    highpassFilter.connect(lowpassFilter);
+                    compressor.connect(gainNode);
+
+                    const destination = audioContext.createMediaStreamDestination();
+                    gainNode.connect(destination);
+
+                    mediaStream = destination.stream;
+
+
+                    client.send(JSON.stringify({
+                        type: 'voice-users',
+                        id: clientId,
+                        username: clientUsername,
+                        muted: false
+                    }));
+
+                    startSignaling();
+
+                } catch (e) {
+                    console.error("Mikrofon erişimi reddedildi veya Web Audio yapılandırma hatası:", e);
+                }
+            }
+        });
+
+        function startSignaling() {
+            client.send(JSON.stringify({
+                type: 'voice-joined',
+                username: clientUsername,
+                id: clientId
+            }));
+        }
+
+    </script>
+
+
+    <!--Websocket And WebRTC-->
+    <script>
+        
+        let clientId;
+        let clientUsername = prompt("Enter a username:");
+        let peers = {};
+
+        const client = new WebSocket(`wss://${window.location.hostname}`);
+
+        client.onmessage = async (event) => {
+            const msg = JSON.parse(event.data);
+
+            if (msg.type === 'id') {
+                clientId = msg.id;
+                console.log(`My id: ${msg.id}`);
+                client.send(JSON.stringify({
+                    type: 'username-created',
+                    username: clientUsername,
+                    id: clientId
+                }));
+            }
+
+            else if (msg.type === 'new-user') {
+                client.send(JSON.stringify({
+                    type: 'voice-users-update'
+                }));
+                console.log(`New user id: ${msg.id}`);
+                // Renograntion şart
+                //await createOffer(msg.id);
+            }
+
+            else if (msg.type === 'answer-req') {
+                await createAnswer(msg.target, msg.from, msg.offer);
+            }
+
+            else if (msg.type === 'answer-created') {
+                await handleAnswer(msg.from, msg.answer);
+            }
+
+            else if (msg.type === 'ice-candidate') {
+                const pc = peers[msg.from]?.pc || peers[msg.from];
+                if (pc) {
+                    await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+                }
+            }
+
+            else if (msg.type === 'voice-joined') {
+                //const targetIdCopy = msg.target;
+                //const pc = peers[msg.target].pc;
+                //pc.close();
+                client.send(JSON.stringify({
+                    type: 'voice-users-update',
+                    muted: false,
+                }));
+                await createOffer(msg.target);
+            }
+
+            else if (msg.type === 'voice-users-update') {
+                const voiceChUl = document.querySelector('#voice-ul');
+                
+                console.log(msg);
+
+                voiceChUl.innerHTML = '';
+                for (let username of msg.usernames) {
+
+                    liElement = document.createElement('li');
+                    liElement.innerHTML = username + ' ';
+                    spanElement = document.createElement('span');
+                    spanElement.innerHTML = '🎙️';
+                    liElement.appendChild(spanElement);
+                    if (msg.spanElement) {
+                        liElement.appendChild(msg.spanElement);
+                    }
+                    else {
+
+                        liElement.appendChild(spanElement);
+                    }
+                    voiceChUl.appendChild(liElement);
+                }
+                
+                const liTags = document.querySelectorAll('li');
+                let userLi;
+                for (let i = 0; i < liTags.length; i++) {
+                    
+                    let text = liTags[i].innerText;
+                    let username = text.split(' ')[0];
+                    
+                    if (username === clientUsername) {
+                        
+                        userLi = liTags[i];
+                        break;
+                    }
+                    
+                }
+
+                if (userLi) {
+                    userLi.addEventListener('click', () => {
+                        const userSpanElement = document.createElement('span');
+
+                        console.log('test');
+                        if (msg.muted) {
+                            spanElement.innerHTML = '🎙️ Muted';
+                        }
+                        
+                        else {
+                            spanElement.innerHTML = '🎙️';
+                        }
+
+                        const audioTrack = mediaStream.getAudioTracks()[0];
+                        if (audioTrack) {
+                            audioTrack.enabled = !msg.muted;
+                        }                   
+                    });
+
+                }
+                
+            }
+
+            else if (msg.type === 'voice-mic-update') {
+
+                const liTags = document.querySelectorAll('li');
+                let userLi;
+                for (let i = 0; i < liTags.length; i++) {
+                    
+                    let text = liTags[i].innerText;
+                    let username = text.split(' ')[0];
+                    
+                    if (username === clientUsername) {
+                        
+                        userLi = liTags[i];
+                        break;
+                    }
+                    
+                }
+
+                if (userButton) {
+                    userButton.addEventListener('click', () => {
+                        const userSpanElement = document.createElement('span');
+
+                        if (msg.muted) {
+                            userSpanElement.innerHTML = '🎙️ Muted';
+                        }
+                        else {
+                            userSpanElement.innerHTML = '🎙️';
+                        }
+
+                        const audioTrack = mediaStream.getAudioTracks()[0];
+                        if (audioTrack) {
+                            audioTrack.enabled = !msg.muted;
+                        }
+                        
+                        client.send(JSON.stringify({
+                            type: 'voice-mic-update',
+                            spanElement: userSpanElement
+                        }));
+                        
+                    });
+
+                }
+
+            }
+        }
+
+        async function createOffer(targetId) {
+            
+            const pc = new RTCPeerConnection({
+                iceServers: [
+                    {
+                        urls: 'stun:stun.l.google.com:19302'
+                    }
+                ]
+            });
+
+            if (mediaStream) {
+
+                mediaStream.getTracks().forEach(track => {
+                    pc.addTrack(track, mediaStream);
+                });
+                
+                pc.ontrack = (event) => {
+                    const remoteStream = event.streams[0];
+                    console.log("📥 Gelen stream:", remoteStream.getAudioTracks().map(t => t.enabled));
+                    const voice = document.querySelector('.voice');
+                    voice.srcObject = remoteStream;
+                    voice.play().catch(err => console.warn("Autoplay engellendi:", err));
+                };
+            }
+            
+            
+            pc.onconnectionstatechange = () => {
+                console.log(`Connection state with ${targetId}:`, pc.connectionState);
+                if (pc.connectionState === "disconnected" || pc.connectionState === "failed" || pc.connectionState === "closed") {
+                    console.log(`Peer connection with ${targetId} closed or lost`);
+                    client.send(JSON.stringify({
+                        type: 'voice-disconnected',
+                        id: targetId
+                    }));
+                    delete peers[targetId];
+                    pc.close();
+                    
+                }
+            };
+
+            const dataChannel = pc.createDataChannel("chat");
+            dataChannel.onopen = () => {
+                console.log(`Data channel opened with ${targetId}`);
+            } 
+            
+            dataChannel.onmessage = (event) => {
+                handleIncomingMessage(event.data);
+            };
+            
+            pc.onicecandidate = (event) => {
+
+                if (event.candidate) {
+                    const iceMsg = {
+                        type: 'ice-candidate',
+                        target: targetId,
+                        from: clientId,
+                        candidate: event.candidate
+                    };
+                    client.send(JSON.stringify(iceMsg));
+                }
+
+            }
+            peers[targetId] = {pc, dataChannel};
+            
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            const offerMessage = JSON.stringify(
+                {
+                    type: 'offer-created', 
+                    target: targetId, 
+                    from: clientId, 
+                    offer: pc.localDescription
+                }
+            );
+            client.send(offerMessage);
+
+            console.log(offerMessage);
+        }
+
+        async function createAnswer(fromId, targetId, offer) {
+
+            const pc = new RTCPeerConnection({
+                iceServers: [
+                    {
+                        urls: 'stun:stun.l.google.com:19302'
+                    }
+                ]
+            });
+
+            /*
+            const stream = await navigator.mediaDevices.getUserMedia({audio: {
+                noiseSuppression: true,
+            }});
+            stream.getTracks().forEach(track => {
+                pc.addTrack(track, stream);
+            })
+
+            const voice = document.querySelector('.voice');
+            voice.volume = 0.5;
+            pc.addEventListener('track', async (event) => {
+                const [remoteStream] = event.streams;
+                voice.srcObject = remoteStream;
+            });
+            */
+
+            if (mediaStream) {
+
+                mediaStream.getTracks().forEach(track => {
+                    pc.addTrack(track, mediaStream);
+                });
+                pc.ontrack = (event) => {
+                    const remoteStream = event.streams[0];
+                    console.log("📥 Gelen stream:", remoteStream.getAudioTracks().map(t => t.enabled));
+                    const voice = document.querySelector('.voice');
+                    voice.srcObject = remoteStream;
+                    voice.play().catch(err => console.warn("Autoplay engellendi:", err));
+                };
+            }
+
+            pc.onconnectionstatechange = () => {
+                console.log(`Connection state with ${targetId}:`, pc.connectionState);
+                if (pc.connectionState === "disconnected" || pc.connectionState === "failed" || pc.connectionState === "closed") {
+                    console.log(`Peer connection with ${targetId} closed or lost`);
+                    client.send(JSON.stringify({
+                        type: 'voice-disconnected',
+                        id: targetId
+                    }));
+                    delete peers[targetId];
+                    pc.close();
+                }
+            };
+
+
+            pc.ondatachannel = (event) => {
+                const dataChannel = event.channel;
+
+                dataChannel.onopen = () => {
+                    console.log("Data channel opened with", targetId);
+                    //dataChannel.send("Hello from answerer!");
+                };
+
+                dataChannel.onmessage = (event) => {
+                    handleIncomingMessage(event.data);
+                };
+
+                peers[targetId].dataChannel = dataChannel;
+
+            };
+
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    const iceMsg = {
+                        type: 'ice-candidate',
+                        target: targetId,
+                        from: clientId,
+                        candidate: event.candidate
+                    };
+                    client.send(JSON.stringify(iceMsg));
+                }
+            };
+            peers[targetId] = {pc};
+
+            await pc.setRemoteDescription(offer);
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+
+            const answerMessage = JSON.stringify({type: 'answer-created', target: targetId, from: clientId, answer: pc.localDescription});
+            client.send(answerMessage);
+
+
+            console.log(answerMessage);
+        }
+
+        async function handleAnswer(fromId, answer) {
+            
+            const pc = peers[fromId].pc;
+
+            await pc.setRemoteDescription(new RTCSessionDescription(answer));
+            console.log("Connected and data channel should be ready soon");
+
+        }
+
+
+
+
+    </script>
+</body>
+</html>
